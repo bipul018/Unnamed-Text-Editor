@@ -1,0 +1,8 @@
+*.exe
+*.git
+*.vs
+*.obj
+*.pdb
+*.out
+*.o
+*.zip

@@ -1,0 +1,10 @@
+fae fdaef as ef sss  ss Now you saw, that on saving and loading it doesn't save cursor position like your other fancy editors.
+You can of course delete text, both backwards by backspace or by delete forward You can also change font size by Ctrl+Mouse scroll. But text won't look so good if not on original font size, as font is loaded only once at start.
+Who would even like that, changing font size ??
+
+
+Now would you like to see it's features?
+As you can see, you could load it from a file named "test.txt" on load.
+You may be surprised that it also saves, but to that same file on close.
+fa woiefu lkj f
+fa oeiu io 
