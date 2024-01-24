@@ -227,7 +227,7 @@ bool key_time_eq_fn(const void* key, const void* data){
 int get_key_count(KeyRecorder* recorder, int keycode){   
     int count_press = 0;
     const double first_time = 0.5;
-    const double not_first_time = 0.05;
+    const double not_first_time = 0.01;
     struct KeyTime* item = get_obj((recorder->times),
 				   (recorder->count),
 				   &keycode,
@@ -354,31 +354,200 @@ void del_char_right(TextLocation *loc){
 	  loc->node->str.len - loc->offset-1);
   loc->node->str.len--;
 }
+
+//Will be start inclusive and end exclusive
+typedef struct TextRange TextRange;
+struct TextRange {
+  TextLocation start;
+  TextLocation end;
+};
+
+void collect_occurances(TextRange to_search,
+			StringView* keywords, size_t key_count,
+			TextRange** out_arr, size_t* out_count){
+
+  snap_cursor_right(&to_search.start);
+  if(to_search.end.node)
+    snap_cursor_right(&to_search.end);
+
+  //Allocate intermediate array
+  size_t total_len = 0;
+  for(int i = 0; i < key_count; ++i)
+    total_len += keywords[i].len;
+  size_t alloc_size = total_len * sizeof(TextLocation) +
+    key_count * sizeof(TextLocation*) +
+    key_count * (sizeof(size_t) + sizeof(TextRange));
+
   
+  TextLocation** key_char_locs = malloc(alloc_size);
+  memset((void*)key_char_locs, 0, alloc_size);
+  TextLocation* temp_buff_ptr = (TextLocation*)(key_char_locs + key_count);
+  for(int i = 0; i < key_count; ++i){
+    key_char_locs[i] = temp_buff_ptr;
+    temp_buff_ptr += keywords[i].len;
+  }
+  //This pointer will be an array to intermediate results, which can be a max of
+  //key_count per loop
+  TextRange* interm_results = (TextRange*)temp_buff_ptr;
+  size_t* interm_key_inxs = (size_t*)(interm_results + key_count);
+  size_t interm_count = 0;
+  
+  while(!((to_search.start.node->next == nullptr) &&
+	 (to_search.start.offset == to_search.start.node->str.len)) &&
+	!((to_search.start.node == to_search.end.node) &&
+	 (to_search.start.offset == to_search.end.offset))){
+
+    char ch = to_search.start.node->str.base[to_search.start.offset];
+    //Initialize interm results to 0
+    interm_count = 0;
+    //Initialize first pointers
+    for(int i = 0; i < key_count; ++i){
+      key_char_locs[i][0] = to_search.start;
+    }
+    
+    //Now right shift each of them if they passed, but also special case for if that happens in end
+    for(int i = 0; i < key_count; ++i){
+      int len = keywords[i].len;
+      //If last case
+      int j = len - 1;
+      if(key_char_locs[i][j].node &&  (keywords[i].base[j] == ch)){
+	TextRange out = {
+	  .start = key_char_locs[i][j],
+	  .end = to_search.start
+	};
+	//Make it end exclusive range
+	move_cursor_right(&out.end);
+	snap_cursor_right(&out.end);
+	interm_results[interm_count++] = out;
+	interm_key_inxs[interm_count-1] = i;
+      }
+      key_char_locs[i][j].node = nullptr;
+      j--;
+      {    
+	for(; j >= 0; --j){
+	  if(key_char_locs[i][j].node && (keywords[i].base[j] == ch)){
+	    key_char_locs[i][j+1] = key_char_locs[i][j];
+	  }
+	  key_char_locs[i][j].node = nullptr;
+	}
+      }
+    }
+
+    //Now if some token is identified, choose it based on some merit
+    if(interm_count > 0){
+      //Let's choose key which is shortest
+      int shorty = 0;
+
+      for(int i = 1; i < interm_count; ++i){
+	int inx_sh = interm_key_inxs[shorty];
+	int inx_it = interm_key_inxs[i];
+	if(keywords[inx_it].len < keywords[inx_sh].len)
+	  shorty = i;
+      }
+      //Keep shorty, discard others
+      push_obj(out_arr, out_count, &interm_results[shorty]);
+      for(int i = 0; i < key_count; ++i){
+	for(int j = 0; j < keywords[i].len; ++j){
+	  key_char_locs[i][j].node = nullptr;
+	}
+      }
+    }
+    move_cursor_right(&to_search.start);
+    snap_cursor_right(&to_search.start);
+  }
+  free(key_char_locs);
+}
+			
+
+
+const char* skip_directories(size_t path_len, const char path[path_len]){
+  bool slash_found = false;
+  int slash_inx = 0;
+  size_t i;
+  for(i = 0; i < path_len; ++i){
+    if(('/' == path[i]) || ('\\' == path[i])){
+      slash_found = true;
+      slash_inx = i;
+    }
+    if('\0' == path[i]){
+      break;
+    }
+  }
+  if(slash_found){
+    return path + slash_inx + 1;
+  }
+  return path + i;
+}
 
 int main(int argc, char* argv[]){
+  const char* file_name = "test.txt";
+  if(argc == 2){
+    if(strcmp(argv[1],"-a") != 0)
+      file_name = argv[1];
+  }
+  double autosave = 10;
+  if(argc == 3){
+    if(strcmp(argv[1],"-a") != 0)
+      file_name = argv[1];
+    else
+      autosave = atof(argv[2]);
+  }
+  if(argc == 4){
+    if(strcmp(argv[1],"-a") == 0){
+      autosave = atof(argv[2]);
+      file_name = argv[3];
+    }
+    else if(strcmp(argv[2], "-a") == 0){
+      autosave = atof(argv[3]);
+      file_name = argv[1];
+    }
+    else{
+      file_name = argv[1];
+    }
+  }
 
-  rl_init_lib("raylib");
+  //Make relative path to exe a thing
+
+  const char* font_file = "JetBrainsMonoNL-Regular.ttf";
+  const char* raylib_dll_file = "raylib.dll";
+
+  char* adj_font_file = malloc(strlen(font_file) + strlen(argv[0]) + 1);
+  char* adj_raylib_dll_file = malloc(strlen(raylib_dll_file) + strlen(argv[0]) + 1);
+
+  const char* upto_exe_dir = skip_directories(strlen(argv[0]), argv[0]);
+  memcpy(adj_font_file, argv[0], upto_exe_dir-argv[0]);
+  memcpy(adj_raylib_dll_file, argv[0], upto_exe_dir-argv[0]);
+
+  strcpy(adj_font_file + (upto_exe_dir - argv[0]), font_file);
+  strcpy(adj_raylib_dll_file + (upto_exe_dir - argv[0]), raylib_dll_file);
+  
+  
+  //rl_init_lib("raylib");
+  rl_init_lib(adj_raylib_dll_file);
 
   rl_set_trace_log_level(LOG_WARNING);
   rl_set_config_flags(FLAG_WINDOW_RESIZABLE);
-  rl_init_window(1000,800, "Trying out stuff");
+  rl_init_window(1000,800, rl_text_format("Unnamed Editor: %s",file_name));
   rl_set_target_f_p_s(60);
 
   //Load font
   //default_font = rl_load_font("CascadiaMono.ttf");
   //  default_font = rl_load_font("l_10646.ttf");
   //default_font = rl_load_font("Sanskr.ttf");
-  int font_size = 50;
-  default_font = rl_load_font_ex("JetBrainsMonoNL-Regular.ttf",font_size,NULL,0);
+  int font_size = 30;
+  //default_font = rl_load_font_ex(,font_size,NULL,0);
+  default_font = rl_load_font_ex(adj_font_file, font_size, NULL, 0);
+
+
+  
   if(!rl_is_font_ready(default_font)){
     default_font = rl_get_font_default();
   }
 
   
-  LinkedNativeString *head_node = malloc(sizeof(*head_node) + 10);
+  LinkedNativeString *head_node = malloc(sizeof(*head_node) + 1);
   head_node->prev = head_node->next = NULL;
-  head_node->capacity =  10;
+  head_node->capacity =  1;
   head_node->str.len = 0;
 
   TextLocation curr_pos = {.node = head_node};
@@ -386,9 +555,16 @@ int main(int argc, char* argv[]){
   int x0 = 10;
   int y0 = 10;
 
-
+  char* c_str_of_keys[] = {
+    #include "c_keywords.txt"
+  };
+  StringView keys_to_color[_countof(c_str_of_keys)] = {0};
+  for(int i = 0; i < (int)_countof(keys_to_color); ++i){
+    keys_to_color[i] = view_cstr(c_str_of_keys[i]);
+  }
+  
   //Load text.txt file
-  const char* file_name = "test.txt";
+
   FILE* file = fopen(file_name, "r");
   if(nullptr == file){
     printf("Error in opening file %s for reading\n", file_name);
@@ -403,7 +579,7 @@ int main(int argc, char* argv[]){
     fclose(file);
   }
     
-  
+  double last_save = rl_get_time();
 
   double prev_blink_time = rl_get_time();
   bool blink_now = true;
@@ -431,7 +607,28 @@ int main(int argc, char* argv[]){
     else{
       y0 += m_zoom * font_size /2.0;
     }
-    
+    //Save file
+    if(((rl_is_key_down(KEY_LEFT_CONTROL) ||
+	rl_is_key_down(KEY_RIGHT_CONTROL)) &&
+	rl_is_key_released('S')) ||
+       ((rl_get_time() - last_save) > autosave)){
+      file = fopen(file_name, "w");
+      if(nullptr == file){
+	printf("Error in opening file %s for writing\n", file_name);
+      }
+      else{
+	LinkedNativeString* node_ptr = head_node;
+	while(node_ptr){
+	  size_t i = 0;
+	  for(; i < node_ptr->str.len; ++i){
+	    fputc((int)node_ptr->str.base[i], file);
+	  }
+	  node_ptr = node_ptr->next;
+	}
+	fclose(file);
+      }
+      last_save = rl_get_time();
+    }
 
     int press_count = 0;
     /* press_count = get_key_count(&recorder, KEY_UP); */
@@ -523,48 +720,32 @@ int main(int argc, char* argv[]){
 	  node = node->next;
       }
     }
-    
+
+    //Setup keywords to highlight
+    //Grossly inefficient, doing this each frame
+    //more so when the whole string , in and out of screen is already being travesed
+    TextRange whole_text = {
+      .start = head_node
+    };
+    TextRange* captured_substrs = nullptr;
+    size_t substr_count = 0;
+    size_t curr_substr = 0;
+    collect_occurances(whole_text, keys_to_color, _countof(keys_to_color),
+		       &captured_substrs, &substr_count);
+    bool in_color_region = false;
     int width = rl_get_screen_width();
     int height = rl_get_screen_height();    
     int cx = x0;
     int cy = y0;
-      //    int height = font_size;
 
-    LinkedNativeString* node_ptr = head_node;
-    while(node_ptr){
-      size_t i = 0;
-      for(; i < node_ptr->str.len; ++i){
-
-	if((node_ptr == curr_pos.node) &&
-	   (i == curr_pos.offset)){
-	  int wid = 3;
-	  if((10 + cx + wid) >= (width + x0)){
-	    cy += 10 + font_size;
-	    cx = x0;
-	  }
-	  if(blink_now)
-	    rl_draw_rectangle(cx,cy-2,wid,font_size+10,RED);
-	  cx += wid;
-	}
-	
-	int wid = get_char_width(node_ptr->str.base[i], font_size);
-
-	if((0 > wid) || ((10 + cx + wid) >= (width + x0))){
-	  cy += 10 + font_size;
-	  cx = x0;
-	}
-				       
-
-	{
-	  char letter[2] = {node_ptr->str.base[i]};
-	  draw_text(letter, cx, cy, font_size, BLACK);
-	}
-	cx += wid;
-	      
-      }
-      
-      if((node_ptr == curr_pos.node) &&
-	 (i == curr_pos.offset)){
+    TextLocation draw_cursor = {
+      .node = head_node, .offset = 0
+    };
+    snap_cursor_right(&curr_pos);
+    while(true){
+      snap_cursor_right(&draw_cursor);
+      if((curr_pos.node == draw_cursor.node) &&
+	 (curr_pos.offset == draw_cursor.offset)){
 	int wid = 3;
 	if((10 + cx + wid) >= (width + x0)){
 	  cy += 10 + font_size;
@@ -574,9 +755,43 @@ int main(int argc, char* argv[]){
 	  rl_draw_rectangle(cx,cy-2,wid,font_size+10,RED);
 	cx += wid;
       }
+      if((nullptr == draw_cursor.node->next) &&
+	  (draw_cursor.offset >= draw_cursor.node->str.len))
+	break;
 
-      node_ptr = node_ptr->next;
+      //Coloring logic
+      if(substr_count > curr_substr){
+	if(in_color_region){
+	  if((captured_substrs[curr_substr].end.node == draw_cursor.node) &&
+	     (captured_substrs[curr_substr].end.offset == draw_cursor.offset)){
+	    in_color_region = false;
+	    curr_substr++;
+	  }
+	}
+	//This for if another keyword also starts immediately after
+	if(!in_color_region){
+	  if((captured_substrs[curr_substr].start.node == draw_cursor.node) &&
+	     (captured_substrs[curr_substr].start.offset == draw_cursor.offset)){
+	    in_color_region = true;
+	  }
+	}
+      }
+
+      char ch = draw_cursor.node->str.base[draw_cursor.offset];
+      	
+      int wid = get_char_width(ch, font_size);
+
+      if((0 > wid) || ((10 + cx + wid) >= (width + x0))){
+	cy += 10 + font_size;
+	cx = x0;
+      }
+      char letter[2] = {ch};
+      draw_text(letter, cx, cy, font_size, (in_color_region?BLUE:BLACK));
+      cx += wid;
+      move_cursor_right(&draw_cursor);
     }
+    if(substr_count > 0)
+      free(captured_substrs);
     
     rl_end_drawing();
   }
